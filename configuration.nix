@@ -7,6 +7,7 @@
   imports = [
     (modulesPath + "/installer/scan/not-detected.nix")
     (modulesPath + "/profiles/qemu-guest.nix")
+    ./secret
     ./disk-config.nix
     ./nginx.nix
     ./xray.nix
