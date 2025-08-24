@@ -12,6 +12,7 @@
     ./nginx.nix
     ./xray.nix
     ./nix.nix
+    ./wireguard.nix
   ];
   boot.loader.grub = {
     efiSupport = true;
