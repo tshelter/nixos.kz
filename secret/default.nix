@@ -1,8 +1,12 @@
-{ self, system, ... }:
+{ self, system, lib, ... }:
 {
   environment.systemPackages = [
     self.inputs.agenix.packages."${system}".default
   ];
-  age.secrets.xray.file = ./xray.age;
-  age.secrets.wireguard.file = ./wireguard.age;
+  age.secrets = lib.mapAttrs'
+    (n: v: {
+      name = builtins.replaceStrings [ ".age" ] [ "" ] n;
+      value = { file = ./${n}; };
+    })
+    (import ./secrets.nix);
 }
