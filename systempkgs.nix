@@ -1,4 +1,7 @@
 { pkgs, ... }:
+let
+  dpdk' = pkgs.dpdk.override { withExamples = [ "all" ]; };
+in
 {
   environment.systemPackages = with pkgs; [
     axel
@@ -10,6 +13,8 @@
     cmatrix
     curl
     dig
+    dpdk'
+    dpdk'.examples
     ethtool
     ffmpeg
     figlet
