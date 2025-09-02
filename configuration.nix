@@ -13,6 +13,7 @@
     ./xray.nix
     ./nix.nix
     ./wireguard.nix
+    ./systempkgs.nix
   ];
   boot.loader.grub = {
     efiSupport = true;
@@ -30,11 +31,6 @@
   ];
   networking.defaultGateway = "45.86.80.1";
   networking.nameservers = [ "1.1.1.1" "1.0.0.1" ];
-
-  environment.systemPackages = map lib.lowPrio [
-    pkgs.curl
-    pkgs.gitMinimal
-  ];
 
   users.users.root.openssh.authorizedKeys.keys = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYcdiZTkmjVhqK+IEDv6Q9bSSyc7LkWK3vyfsPkVMen dev@zxc.sx"

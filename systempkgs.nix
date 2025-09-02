@@ -1,0 +1,61 @@
+{ pkgs, ... }:
+{
+  environment.systemPackages = with pkgs; [
+    axel
+    binutils
+    black
+    btop
+    clang
+    cmake
+    cmatrix
+    curl
+    dig
+    ethtool
+    ffmpeg
+    figlet
+    file
+    gcc
+    git
+    gnumake
+    go
+    gofumpt
+    htop
+    iftop
+    inetutils
+    iotop
+    iperf
+    iproute2
+    isort
+    jq
+    micro
+    moreutils
+    ncdu
+    neofetch
+    nettools
+    nmap
+    nodejs
+    openssl
+    ouch
+    p7zip
+    pkg-config
+    python3
+    python3Packages.speedtest-cli
+    python3Packages.yt-dlp
+    ruff
+    rustup
+    sshpass
+    sshuttle
+    stress
+    syslinux # gethostip -x ip => hex
+    tcpdump
+    tcpreplay
+    tmux
+    tree
+    unzip
+    uv
+    vim
+    wget
+    wireguard-tools
+    zip
+  ];
+}
