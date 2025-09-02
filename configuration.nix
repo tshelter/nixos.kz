@@ -19,6 +19,7 @@
     efiSupport = true;
     efiInstallAsRemovable = true;
   };
+  services.fail2ban.enable = true;
   services.openssh.enable = true;
 
   networking.hostName = "gtw";
