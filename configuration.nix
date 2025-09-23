@@ -14,6 +14,7 @@
     ./nix.nix
     ./wireguard.nix
     ./systempkgs.nix
+    ./zapret.nix
   ];
   boot.loader.grub = {
     efiSupport = true;
