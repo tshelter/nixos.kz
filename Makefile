@@ -1,5 +1,5 @@
 switch:
-	nixos-rebuild switch --flake .#gtw --target-host root@45.86.80.39 --build-host root@45.86.80.39 --fast
+	nix run nixpkgs#deploy-rs .
 
 update:
 	nix flake update --commit-lock-file
