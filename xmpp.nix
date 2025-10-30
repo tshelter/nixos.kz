@@ -30,7 +30,7 @@
           -Rm u:prosody:rx \
           /var/lib/acme/zxc.sx
       '';
-      reloadServices = [ "prosody.service" ]; 
+      reloadServices = [ "prosody.service" ];
     };
   };
   environment.systemPackages = with pkgs; [ acl ];
