@@ -30,8 +30,6 @@
           proxy_set_header Host cache.nixos.org;
           proxy_ssl_server_name on;
           proxy_redirect off;
-          proxy_buffering off;
-          proxy_request_buffering off;
         '';
       };
     };
