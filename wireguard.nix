@@ -19,7 +19,7 @@
       }
       {
         name = "dev@zxc.sx_taoyao";
-        publicKey = "iHtL4Ykxc5rG9BGz20/VUhcYM+RuJWFoD29kl+aeL2U=";
+        publicKey = "BYqXjD930Yi4WAhdH+7r9NTIk/yJW3fYasxgQm/zYC8=";
         allowedIPs = [ "192.168.99.11/32" ];
       }
     ];
