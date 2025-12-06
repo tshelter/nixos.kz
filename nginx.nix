@@ -2,10 +2,8 @@
 {
   services.nginx = {
     enable = true;
-    package = pkgs.nginxQuic;
 
     virtualHosts."ip.zxc.sx" = {
-      quic = true;
       addSSL = true;
       enableACME = true;
       extraConfig = "default_type text/plain;";
@@ -15,7 +13,6 @@
     };
 
     virtualHosts."nixos.kz" = {
-      quic = true;
       addSSL = true;
       enableACME = true;
       serverAliases = [ "www.nixos.kz" ];
@@ -25,7 +22,6 @@
     };
 
     virtualHosts."cache.nixos.kz" = {
-      quic = true;
       addSSL = true;
       enableACME = true;
       locations."/" = {
@@ -45,5 +41,4 @@
   };
 
   networking.firewall.allowedTCPPorts = [ 80 443 ];
-  networking.firewall.allowedUDPPorts = [ 443 ];
 }

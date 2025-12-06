@@ -4,12 +4,12 @@
   networking.nat.externalInterface = "ens3";
   networking.nat.internalInterfaces = [ "wg0" ];
   boot.kernel.sysctl."net.ipv4.ip_forward" = "1";
-  networking.firewall.allowedUDPPorts = [ 45767 ];
+  networking.firewall.allowedUDPPorts = [ 443 ];
 
   networking.wireguard.enable = true;
   networking.wireguard.interfaces.wg0 = {
     ips = [ "192.168.99.1/24" ];
-    listenPort = 45767;
+    listenPort = 443;
     privateKeyFile = config.age.secrets.wireguard.path;
     peers = [
       {
