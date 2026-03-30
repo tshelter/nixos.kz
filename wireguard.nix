@@ -1,7 +1,7 @@
 { pkgs, config, ... }:
 {
   networking.nat.enable = true;
-  networking.nat.externalInterface = "ens3";
+  networking.nat.externalInterface = "enp1s0";
   networking.nat.internalInterfaces = [ "wg0" ];
   boot.kernel.sysctl."net.ipv4.ip_forward" = "1";
   networking.firewall.allowedUDPPorts = [ 443 ];
@@ -27,11 +27,6 @@
         name = "dev@zxc.sx_t14s";
         publicKey = "B+pzwl4qX7XLaNhuA+ZbuZ/0VbjupgVd2Q45v7mAPTQ=";
         allowedIPs = [ "192.168.99.12/32" ];
-      }
-      {
-        name = "mini";
-        publicKey = "i4kWN956ycY7QgmULmS+Q9J1gIk0MRaYgqY+53bZb2c=";
-        allowedIPs = [ "192.168.99.100/32" ];
       }
     ];
   };

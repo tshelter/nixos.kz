@@ -13,8 +13,8 @@ in
     cmatrix
     curl
     dig
-    dpdk'
-    dpdk'.examples
+#    dpdk'
+#    dpdk'.examples
     ethtool
     ffmpeg
     figlet
