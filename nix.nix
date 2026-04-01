@@ -1,4 +1,4 @@
-{ self, ... }:
+{ self, lib, ... }:
 {
   nix.extraOptions = ''
     experimental-features = nix-command flakes
@@ -12,4 +12,12 @@
   };
   nix.optimise.automatic = true;
   nix.optimise.dates = [ "04:00" ];
+
+  nix.settings.substituters = lib.mkForce [
+#   "https://mirrors.tuna.tsinghua.edu.cn/nix-channels/store/"
+    "https://nixos-cache-proxy.cofob.dev"
+    "https://mirror.yandex.ru/nixos/"
+    "https://cache.nixos.kz"
+    "https://cache.nixos.org"
+  ];
 }
