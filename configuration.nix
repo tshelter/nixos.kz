@@ -14,6 +14,7 @@
     ./wireguard.nix
     ./systempkgs.nix
     ./zapret.nix
+    ./minecraft.nix
   ];
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
