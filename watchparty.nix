@@ -1,5 +1,6 @@
 { pkgs, ... }:
 let
+  # Pinned upstream WatchParty revision for the local deployment on wp.zxc.sx.
   watchpartyRevision = "dc3adba0edd30170340da61f74623914d61cc6bd";
   watchpartyImage = "watchparty:${watchpartyRevision}-nixos1";
   watchpartyServerContainerName = "watchparty";
@@ -31,7 +32,8 @@ let
   watchpartyHost = "wp.zxc.sx";
   watchpartyPort = 18080;
   watchpartyVmworkerPort = 13100;
-  unlimitedRoomCapacity = 0;
+  watchpartyDbPasswordFile = "/var/lib/watchparty/db-password";
+  noRoomCapacityLimit = 0;
   oneYearInSeconds = 365 * 24 * 60 * 60;
 in
 {
@@ -131,7 +133,7 @@ in
     script = ''
       set -euo pipefail
 
-      password="$(tr -d '\n' < /var/lib/watchparty/db-password)"
+      password="$(tr -d '\n' < ${watchpartyDbPasswordFile})"
 
       if [ "$(psql -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'watchparty'")" != '1' ]; then
         printf '%s\n' \
@@ -219,12 +221,13 @@ in
     script = ''
       set -euo pipefail
 
+      dbPassword="$(cat ${watchpartyDbPasswordFile})"
       exec docker run --rm --name ${watchpartyServerContainerName} --network host \
-        -e DATABASE_URL="postgresql://watchparty:$(cat /var/lib/watchparty/db-password)@127.0.0.1:5432/watchparty?sslmode=disable" \
+        -e DATABASE_URL="postgresql://watchparty:$dbPassword@127.0.0.1:5432/watchparty?sslmode=disable" \
         -e PORT=${toString watchpartyPort} \
         -e HOST=127.0.0.1 \
-        -e ROOM_CAPACITY=${toString unlimitedRoomCapacity} \
-        -e ROOM_CAPACITY_SUB=${toString unlimitedRoomCapacity} \
+        -e ROOM_CAPACITY=${toString noRoomCapacityLimit} \
+        -e ROOM_CAPACITY_SUB=${toString noRoomCapacityLimit} \
         -e VMWORKER_PORT=${toString watchpartyVmworkerPort} \
         ${watchpartyImage}
     '';
@@ -258,10 +261,13 @@ in
     script = ''
       set -euo pipefail
 
+      dbPassword="$(cat ${watchpartyDbPasswordFile})"
+      # Docker:standard:EU:0:64:${watchpartyHost} = provider:tier:region:minReady:maxReady:publicHost.
+      # Here minReady=0 keeps no browsers permanently warm, while maxReady=64 allows up to 64 local Chromium sessions.
       exec docker run --rm --name ${watchpartyVmworkerContainerName} --network host \
         -v /var/lib/watchparty/.ssh:/root/.ssh:ro \
         -v /var/lib/acme:/var/lib/acme:ro \
-        -e DATABASE_URL="postgresql://watchparty:$(cat /var/lib/watchparty/db-password)@127.0.0.1:5432/watchparty?sslmode=disable" \
+        -e DATABASE_URL="postgresql://watchparty:$dbPassword@127.0.0.1:5432/watchparty?sslmode=disable" \
         -e NODE_ENV=production \
         -e DOCKER_VM_HOST_SSH_USER=watchparty \
         -e VBROWSER_ADMIN_KEY="$(cat /var/lib/watchparty/vbrowser-admin-key)" \
