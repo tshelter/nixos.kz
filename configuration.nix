@@ -15,6 +15,7 @@
     ./systempkgs.nix
     ./zapret.nix
     ./minecraft.nix
+    ./watchparty.nix
   ];
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
