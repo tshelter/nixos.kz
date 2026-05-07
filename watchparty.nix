@@ -1,15 +1,18 @@
 { pkgs, ... }:
 let
   watchpartyRev = "dc3adba0edd30170340da61f74623914d61cc6bd";
+  watchpartyReleaseId = "${watchpartyRev}-nixos1";
   watchpartyDomain = "wp.zxc.sx";
   watchpartyRoot = "/var/lib/watchparty";
-  watchpartyRelease = "${watchpartyRoot}/releases/${watchpartyRev}";
+  watchpartyRelease = "${watchpartyRoot}/releases/${watchpartyReleaseId}";
   watchpartyCurrent = "${watchpartyRoot}/current";
   watchpartyEnv = ''
     HOST=127.0.0.1
     PORT=8081
     VITE_SERVER_HOST=https://${watchpartyDomain}
+    # Blank on purpose to keep browser access open without sign-in requirements.
     VITE_FIREBASE_CONFIG=
+    # Zero means unlimited rooms in WatchParty.
     ROOM_CAPACITY=0
     ROOM_CAPACITY_SUB=0
     VBROWSER_SESSION_SECONDS=86400
@@ -100,6 +103,19 @@ in
 
         src="$tmpdir/watchparty-${watchpartyRev}"
 
+        python - "$src/server/vm/docker.ts" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+old = """const sslEnv =\n      config.NODE_ENV === \"development\" &&\n      config.SSL_KEY_FILE &&\n      config.SSL_CRT_FILE\n        ? `-e NEKO_KEY=\"${config.SSL_KEY_FILE}\" -e NEKO_CERT=\"${config.SSL_CRT_FILE}\"`\n        : \"\";"""
+new = """const sslEnv =\n      config.SSL_KEY_FILE && config.SSL_CRT_FILE\n        ? `-e NEKO_KEY=\"${config.SSL_KEY_FILE}\" -e NEKO_CERT=\"${config.SSL_CRT_FILE}\"`\n        : \"\";"""
+data = path.read_text()
+if old not in data:
+    raise SystemExit("failed to patch docker.ts SSL handling")
+path.write_text(data.replace(old, new))
+PY
+
         cat > "$src/.env" <<'EOF'
 ${watchpartyEnv}
 EOF
@@ -146,7 +162,6 @@ EOF
     wantedBy = [ "multi-user.target" ];
     path = [ pkgs.nodejs ];
     environment = {
-      NODE_ENV = "development";
       SSL_CRT_FILE = "${certDir}/fullchain.pem";
       SSL_KEY_FILE = "${certDir}/privkey.pem";
     };
