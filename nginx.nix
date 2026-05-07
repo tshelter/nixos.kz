@@ -33,6 +33,15 @@
         '';
       };
     };
+
+    virtualHosts."wp.zxc.sx" = {
+      addSSL = true;
+      enableACME = true;
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:8081";
+        proxyWebsockets = true;
+      };
+    };
   };
 
   security.acme = {
