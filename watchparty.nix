@@ -123,7 +123,7 @@ EOF
     path = [ pkgs.nodejs ];
     serviceConfig = {
       WorkingDirectory = watchpartyCurrent;
-      ExecStart = "${pkgs.nodejs}/bin/node server/server.ts";
+      ExecStart = "${pkgs.nodejs}/bin/node --experimental-strip-types server/server.ts";
       Restart = "always";
       RestartSec = 5;
     };
@@ -152,7 +152,7 @@ EOF
     };
     serviceConfig = {
       WorkingDirectory = watchpartyCurrent;
-      ExecStart = "${pkgs.nodejs}/bin/node server/vmWorker.ts";
+      ExecStart = "${pkgs.nodejs}/bin/node --experimental-strip-types server/vmWorker.ts";
       Restart = "always";
       RestartSec = 5;
     };
