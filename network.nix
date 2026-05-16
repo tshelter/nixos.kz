@@ -11,9 +11,8 @@
   networking.defaultGateway = "185.215.163.161";
   networking.nameservers = [ "1.1.1.1" "1.0.0.1" ];
 
-  boot.kernelModules = [ "tcp_bbr" ];
+  # https://queue.acm.org/detail.cfm?id=3022184
   boot.kernel.sysctl = {
-    "net.core.default_qdisc" = "fq";
     "net.ipv4.tcp_congestion_control" = "bbr";
   };
 }
