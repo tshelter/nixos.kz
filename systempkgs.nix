@@ -25,6 +25,7 @@ in
     go
     gofumpt
     htop
+    hping
     iftop
     inetutils
     iotop
