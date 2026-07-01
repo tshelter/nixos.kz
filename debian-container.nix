@@ -6,7 +6,7 @@
       if [ ! -d /var/lib/machines/debian ]; then
         echo "Bootstrapping Debian bookworm..."
         ${pkgs.debootstrap}/bin/debootstrap \
-          --include=openssh-server \
+          --include=openssh-server,dbus \
           bookworm \
           /var/lib/machines/debian
 
@@ -23,9 +23,11 @@ EOF
 
         printf "nameserver 1.1.1.1\nnameserver 1.0.0.1\n" \
           > /var/lib/machines/debian/etc/resolv.conf
-
-        systemctl --root=/var/lib/machines/debian enable ssh
       fi
+
+      mkdir -p /var/lib/machines/debian/etc/systemd/system/multi-user.target.wants
+      ln -sfn /lib/systemd/system/ssh.service \
+        /var/lib/machines/debian/etc/systemd/system/multi-user.target.wants/ssh.service
     '';
     deps = [ ];
   };
@@ -35,7 +37,7 @@ EOF
     networkConfig.Bridge = "br-debian";
   };
 
-  systemd.services."systemd-nspawn@debian".wantedBy = [ "machines.target" ];
+  systemd.targets.machines.wants = [ "systemd-nspawn@debian.service" ];
 
   networking.bridges."br-debian".interfaces = [ ];
   networking.interfaces."br-debian".ipv4.addresses = [
