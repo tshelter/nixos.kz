@@ -17,6 +17,7 @@
     ./zapret.nix
     ./minecraft.nix
     ./jellyfin.nix
+    ./debian-container.nix
   ];
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
