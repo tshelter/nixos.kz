@@ -16,6 +16,7 @@ in
     dpdk'
     dpdk'.examples
     ethtool
+    fastfetch
     ffmpeg
     figlet
     file
@@ -36,7 +37,6 @@ in
     micro
     moreutils
     ncdu
-    neofetch
     nettools
     nmap
     nodejs
