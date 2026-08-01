@@ -8,6 +8,7 @@
     (modulesPath + "/installer/scan/not-detected.nix")
     (modulesPath + "/profiles/qemu-guest.nix")
     ../../modules/base.nix
+    ../../modules/nixos-revision.nix
     ./secret
     ../../modules/nginx.nix
     ../../modules/xray.nix

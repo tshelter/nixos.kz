@@ -3,6 +3,7 @@
   imports = [
     ./hardware-configuration.nix
     ../../modules/base.nix
+    ../../modules/nixos-revision.nix
     ../../modules/nix.nix
     ../../modules/fresh-host-base.nix
     ../../modules/systempkgs.nix
