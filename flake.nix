@@ -22,28 +22,49 @@
           (self: super: { deploy-rs = { inherit (pkgs) deploy-rs; lib = super.deploy-rs.lib; }; })
         ];
       };
-    in
-    {
-      nixosConfigurations.gtw = nixpkgs.lib.nixosSystem rec {
-        system = "x86_64-linux";
+
+      # One entry per server. `domain` is the SSH/deploy target.
+      # `extraModules` are host modules that aren't already imported from
+      # within hosts/<name>/configuration.nix itself.
+      hosts = {
+        gtw = {
+          domain = "nixos.kz";
+          extraModules = [ ./hosts/gtw/hardware-configuration.nix ];
+        };
+        a = {
+          domain = "a.zxc.sx";
+          extraModules = [ ];
+        };
+        b = {
+          domain = "b.zxc.sx";
+          extraModules = [ ];
+        };
+        # c = { domain = "c.zxc.sx"; extraModules = [ ]; };
+      };
+
+      mkHost = name: { extraModules, ... }: nixpkgs.lib.nixosSystem rec {
+        inherit system;
         specialArgs = attrs // { inherit system; };
         modules = [
           agenix.nixosModules.default
-          ./configuration.nix
-          ./hardware-configuration.nix
-        ];
+          ./hosts/${name}/configuration.nix
+        ] ++ extraModules;
       };
-      deploy.nodes.gtw =
-        {
-          hostname = "nixos.kz";
-          profiles.system = {
-            user = "root";
-            sshUser = "root";
-            remoteBuild = true;
-            fastConnection = true;
-            path = deployPkgs.deploy-rs.lib.activate.nixos self.nixosConfigurations.gtw;
-          };
+
+      mkDeployNode = name: { domain, ... }: {
+        hostname = domain;
+        profiles.system = {
+          user = "root";
+          sshUser = "root";
+          remoteBuild = true;
+          fastConnection = true;
+          path = deployPkgs.deploy-rs.lib.activate.nixos self.nixosConfigurations.${name};
         };
+      };
+    in
+    {
+      nixosConfigurations = builtins.mapAttrs mkHost hosts;
+      deploy.nodes = builtins.mapAttrs mkDeployNode hosts;
       #      checks = builtins.mapAttrs (system: deployLib: deployLib.deployChecks self.deploy) deploy-rs.lib;
     };
 }

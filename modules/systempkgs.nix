@@ -1,7 +1,4 @@
 { pkgs, ... }:
-let
-  dpdk' = pkgs.dpdk.override { withExamples = [ "all" ]; };
-in
 {
   environment.systemPackages = with pkgs; [
     axel
@@ -13,8 +10,6 @@ in
     cmatrix
     curl
     dig
-    dpdk'
-    dpdk'.examples
     ethtool
     fastfetch
     ffmpeg
