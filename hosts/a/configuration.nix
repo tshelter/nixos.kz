@@ -10,6 +10,8 @@
     ./nginx.nix
     ./secret
     ../../modules/xray.nix
+    ./wireguard.nix
+    ../../modules/zapret.nix
   ];
 
   networking.hostName = "a";
