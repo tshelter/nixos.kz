@@ -13,6 +13,7 @@
     ../../modules/xray.nix
     ./wireguard.nix
     ../../modules/zapret.nix
+    ./qbittorrent.nix
   ];
 
   networking.hostName = "b";
