@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""Telegram bot that downloads TikTok / Instagram videos and photos (no ads).
+
+Send it any message containing a TikTok or Instagram link and it replies with
+the media. Handles short links (vt.tiktok.com), single videos, Instagram reels
+and posts, and TikTok / Instagram photo slideshows (multiple images).
+
+TikTok is fetched via the tikwm.com API (clean, no-watermark, supports photo
+slideshows) with a yt-dlp fallback. Instagram is fetched with yt-dlp; drop an
+exported cookies.txt into STATE_DIR for private / rate-limited posts.
+
+Config via environment:
+  BOT_TOKEN          - Telegram bot token (required)
+  ALLOWED_USER_IDS   - space/comma separated user ids; empty = everyone
+  STATE_DIR          - writable dir; optional cookies.txt here goes to yt-dlp
+  MAX_UPLOAD_MB      - skip files larger than this (default 49, Telegram limit)
+  MAX_CONCURRENCY    - simultaneous downloads (default 3)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import yt_dlp
+from sssig import SssInstagram
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatAction, ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("tgbot-dl")
+
+TOKEN = os.environ["BOT_TOKEN"]
+ALLOWED = {
+    int(x)
+    for x in re.split(r"[,\s]+", os.environ.get("ALLOWED_USER_IDS", "").strip())
+    if x
+}
+STATE_DIR = Path(os.environ.get("STATE_DIR", ".")).resolve()
+COOKIES = STATE_DIR / "cookies.txt"
+MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "49")) * 1024 * 1024
+
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+URL_RE = re.compile(r"https?://\S+", re.I)
+TIKTOK_RE = re.compile(r"(?:^|\.)tiktok\.com$|(?:^|\.)douyin\.com$", re.I)
+INSTAGRAM_RE = re.compile(r"(?:^|\.)(?:instagram\.com|instagr\.am|ig\.me)$", re.I)
+
+VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+AUDIO_EXT = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".flac"}
+MEDIA_EXT = VIDEO_EXT | IMAGE_EXT | AUDIO_EXT
+
+_sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENCY", "3")))
+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+sss = SssInstagram()
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+def _host(url: str) -> str:
+    m = re.match(r"https?://([^/]+)", url, re.I)
+    if not m:
+        return ""
+    return m.group(1).split("@")[-1].split(":")[0].lower()
+
+
+def _platform(url: str) -> str | None:
+    h = _host(url)
+    if TIKTOK_RE.search(h) or "tiktok" in h:
+        return "tiktok"
+    if INSTAGRAM_RE.search(h):
+        return "instagram"
+    return None
+
+
+def _esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")[:500]
+
+
+def _http_get(url: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://www.tiktok.com/"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _download_to(url: str, dest: Path, timeout: int = 120) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://www.tiktok.com/"})
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+# --------------------------------------------------------------------------- #
+# TikTok via tikwm.com
+# --------------------------------------------------------------------------- #
+def _tiktok_tikwm(url: str, outdir: str) -> dict:
+    api = "https://tikwm.com/api/?hd=1&url=" + urllib.parse.quote(url, safe="")
+    data = json.loads(_http_get(api))
+    if data.get("code") != 0:
+        raise RuntimeError(f"tikwm: {data.get('msg') or data}")
+    d = data["data"]
+    out = Path(outdir)
+    images = d.get("images") or []
+    if images:
+        for i, img in enumerate(images, 1):
+            _download_to(img, out / f"{i:03d}.jpg")
+    else:
+        video_url = d.get("hdplay") or d.get("play") or d.get("wmplay")
+        if not video_url:
+            raise RuntimeError("tikwm: no video url in response")
+        _download_to(video_url, out / "001.mp4")
+        # slideshows have no video; single videos rarely need the audio track
+    return {
+        "title": d.get("title") or "",
+        "uploader": (d.get("author") or {}).get("unique_id") or "",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# generic / Instagram via yt-dlp
+# --------------------------------------------------------------------------- #
+def _ydl_opts(outdir: str) -> dict:
+    opts = {
+        "outtmpl": str(Path(outdir) / "%(autonumber)03d-%(id)s.%(ext)s"),
+        "format": "bv*+ba/b/best",
+        "merge_output_format": "mp4",
+        "format_sort": ["ext:mp4:m4a", "res", "br"],
+        "noplaylist": False,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "restrictfilenames": True,
+        "concurrent_fragment_downloads": 4,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
+        "socket_timeout": 30,
+    }
+    if COOKIES.exists():
+        opts["cookiefile"] = str(COOKIES)
+    return opts
+
+
+def _ydl_download(url: str, outdir: str) -> dict:
+    with yt_dlp.YoutubeDL(_ydl_opts(outdir)) as ydl:
+        info = ydl.extract_info(url, download=True)
+    return {
+        "title": info.get("title") or info.get("description") or "",
+        "uploader": info.get("uploader") or info.get("uploader_id") or "",
+    }
+
+
+def _blocking_fetch(url: str, outdir: str) -> dict:
+    """Download media for `url` into `outdir`. Returns {title, uploader}."""
+    plat = _platform(url)
+    if plat == "tiktok":
+        try:
+            return _tiktok_tikwm(url, outdir)
+        except Exception as e:  # noqa: BLE001
+            log.warning("tikwm failed for %s (%s); trying yt-dlp", url, e)
+            for p in Path(outdir).iterdir():
+                p.unlink()
+            return _ydl_download(url, outdir)
+    try:
+        return _ydl_download(url, outdir)
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(_friendly_ydl_error(str(e))) from e
+
+
+def _friendly_ydl_error(raw: str) -> str:
+    low = raw.lower()
+    if any(s in low for s in ("login required", "rate-limit", "checkpoint",
+                              "empty media response", "requires authentication")):
+        return "Instagram wants this server to log in to see that post."
+    if "no video in this post" in low:
+        return "Photo-only Instagram post (yt-dlp can't grab those anonymously)."
+    if "unavailable" in low or "not available" in low or "removed" in low:
+        return "The post is private, removed, or region-locked."
+    return re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", raw).strip()[:400]
+
+
+async def _fetch_via_sss(url: str, outdir: str) -> dict:
+    result = await sss.fetch(url)
+    out = Path(outdir)
+    for i, it in enumerate(result["items"], 1):
+        await asyncio.to_thread(_download_to, it["url"], out / f"{i:03d}.{it['ext']}")
+    return {"title": result["title"], "uploader": result["username"]}
+
+
+# --------------------------------------------------------------------------- #
+# sending
+# --------------------------------------------------------------------------- #
+def _shrink_video(path: Path) -> Path | None:
+    out = path.with_name(path.stem + "-small.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(path),
+        "-vf", "scale='min(1280,iw)':-2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+        str(out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        log.warning("ffmpeg shrink failed: %s", e)
+        return None
+    return out if out.exists() and out.stat().st_size <= MAX_UPLOAD else None
+
+
+def _probe(path: Path) -> dict:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height:format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        w, h, dur = r.stdout.split()[:3]
+        return {"width": int(w), "height": int(h), "duration": int(float(dur))}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _caption(meta: dict, url: str) -> str:
+    title = re.sub(r"\s+", " ", (meta.get("title") or "").strip())
+    if len(title) > 800:
+        title = title[:800] + "…"
+    uploader = meta.get("uploader") or ""
+    tail = f'<a href="{url}">source</a>'
+    if uploader:
+        tail = f"@{uploader.lstrip('@')} · " + tail
+    return "\n\n".join(p for p in (title, tail) if p)[:1024]
+
+
+async def _send_media(msg: Message, files: list[Path], caption: str) -> None:
+    prepared: list[Path] = []
+    skipped = 0
+    for f in files:
+        if f.stat().st_size <= MAX_UPLOAD:
+            prepared.append(f)
+        elif f.suffix.lower() in VIDEO_EXT and (s := await asyncio.to_thread(_shrink_video, f)):
+            prepared.append(s)
+        else:
+            skipped += 1
+
+    note = f"\n\n⚠️ {skipped} file(s) too large for Telegram, skipped." if skipped else ""
+    cap = (caption + note)[:1024]
+
+    vids = [f for f in prepared if f.suffix.lower() in VIDEO_EXT]
+    imgs = [f for f in prepared if f.suffix.lower() in IMAGE_EXT]
+    auds = [f for f in prepared if f.suffix.lower() in AUDIO_EXT]
+
+    if len(vids) == 1 and not imgs and not auds:
+        await bot.send_video(msg.chat.id, FSInputFile(vids[0]), caption=cap,
+                             supports_streaming=True,
+                             reply_to_message_id=msg.message_id, **_probe(vids[0]))
+        return
+    if len(imgs) == 1 and not vids and not auds:
+        await bot.send_photo(msg.chat.id, FSInputFile(imgs[0]), caption=cap,
+                             reply_to_message_id=msg.message_id)
+        return
+
+    group_files = vids + imgs
+    first = True
+    for i in range(0, len(group_files), 10):
+        group = []
+        for f in group_files[i:i + 10]:
+            c = cap if first else None
+            first = False
+            if f.suffix.lower() in VIDEO_EXT:
+                group.append(InputMediaVideo(media=FSInputFile(f), caption=c,
+                                             supports_streaming=True))
+            else:
+                group.append(InputMediaPhoto(media=FSInputFile(f), caption=c))
+        if group:
+            await bot.send_media_group(msg.chat.id, group,
+                                       reply_to_message_id=msg.message_id)
+
+    for f in auds:
+        await bot.send_audio(msg.chat.id, FSInputFile(f),
+                             reply_to_message_id=msg.message_id)
+
+    if not prepared:
+        raise RuntimeError("all files were too large for Telegram")
+
+
+# --------------------------------------------------------------------------- #
+# handlers
+# --------------------------------------------------------------------------- #
+async def handle_url(msg: Message, url: str) -> None:
+    async with _sem:
+        await bot.send_chat_action(msg.chat.id, ChatAction.UPLOAD_VIDEO)
+        tmp = tempfile.mkdtemp(prefix="tgdl-", dir=str(STATE_DIR))
+        try:
+            try:
+                meta = await asyncio.to_thread(_blocking_fetch, url, tmp)
+            except Exception as primary_err:  # noqa: BLE001
+                # yt-dlp can't grab Instagram photo posts / carousels
+                # anonymously; sssinstagram's API can. Only worth trying for
+                # Instagram — TikTok already has its tikwm/yt-dlp fallback.
+                if _platform(url) != "instagram":
+                    raise
+                log.info("yt-dlp failed for %s (%s); trying sssinstagram", url, primary_err)
+                for p in Path(tmp).iterdir():
+                    p.unlink()
+                try:
+                    meta = await _fetch_via_sss(url, tmp)
+                except Exception as sss_err:  # noqa: BLE001
+                    log.warning("sssinstagram fallback failed for %s: %s", url, sss_err)
+                    raise primary_err from sss_err
+            files = sorted(p for p in Path(tmp).iterdir()
+                           if p.is_file() and p.suffix.lower() in MEDIA_EXT)
+            if not files:
+                raise RuntimeError("downloaded nothing for this link")
+            await _send_media(msg, files, _caption(meta, url))
+        except Exception as e:  # noqa: BLE001
+            log.exception("failed on %s", url)
+            await msg.reply(f"❌ Couldn't download that link.\n<code>{_esc(str(e))}</code>")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+HELP = (
+    "Send me a <b>TikTok</b> or <b>Instagram</b> link and I'll send back the "
+    "video or photos — no watermark, no ads.\n\n"
+    "Works with short links (vt.tiktok.com/…), reels, posts and photo "
+    "slideshows. Several links in one message are fine."
+)
+
+
+@dp.message(CommandStart())
+async def on_start(msg: Message) -> None:
+    await msg.answer(HELP)
+
+
+@dp.message(Command("help"))
+async def on_help(msg: Message) -> None:
+    await msg.answer(HELP)
+
+
+@dp.message(F.text)
+async def on_text(msg: Message) -> None:
+    if ALLOWED and msg.from_user and msg.from_user.id not in ALLOWED:
+        return
+    urls = [u.rstrip(").,]'\"") for u in URL_RE.findall(msg.text or "")]
+    urls = [u for u in urls if _platform(u)]
+    if not urls:
+        if msg.chat.type == "private":
+            await msg.reply("Send me a TikTok or Instagram link. /help for details.")
+        return
+    for url in urls:
+        await handle_url(msg, url)
+
+
+async def main() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    me = await bot.get_me()
+    log.info("starting as @%s (id=%s); allowlist=%s; cookies=%s",
+             me.username, me.id, ALLOWED or "everyone", COOKIES.exists())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await sss.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

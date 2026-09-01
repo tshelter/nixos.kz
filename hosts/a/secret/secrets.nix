@@ -6,4 +6,5 @@ in
 {
   "xray.age".publicKeys = publicKeys;
   "wireguard.age".publicKeys = publicKeys;
+  "yetdlp.age".publicKeys = publicKeys;
 }

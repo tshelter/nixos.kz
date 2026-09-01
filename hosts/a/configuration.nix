@@ -13,6 +13,7 @@
     ../../modules/xray.nix
     ./wireguard.nix
     ../../modules/zapret.nix
+    ./yetdlp.nix
   ];
 
   networking.hostName = "a";
