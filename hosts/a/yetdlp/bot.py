@@ -5,6 +5,12 @@ Send it any message containing a TikTok or Instagram link and it replies with
 the media. Handles short links (vt.tiktok.com), single videos, Instagram reels
 and posts, and TikTok / Instagram photo slideshows (multiple images).
 
+Also works in guest mode (like @mira and similar bots): reply to someone's
+message that contains a link and mention @yetdlpbot in the reply, or just
+mention @yetdlpbot with a link in your own message, in any chat it isn't a
+member of. Requires "Guest Mode" turned on for this bot in BotFather's Mini
+App (Bot Settings) -- there's no slash command for this one.
+
 TikTok is fetched via the tikwm.com API (clean, no-watermark, supports photo
 slideshows) with a yt-dlp fallback. Instagram is fetched with yt-dlp; drop an
 exported cookies.txt into STATE_DIR for private / rate-limited posts.
@@ -37,7 +43,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
+from aiogram.types import (
+    FSInputFile,
+    InlineQueryResultArticle,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputTextMessageContent,
+    Message,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +87,7 @@ _sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENCY", "3")))
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 sss = SssInstagram()
+BOT_ID = int(TOKEN.split(":", 1)[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -208,6 +222,32 @@ async def _fetch_via_sss(url: str, outdir: str) -> dict:
     return {"title": result["title"], "uploader": result["username"]}
 
 
+async def _fetch_any(url: str, outdir: str) -> tuple[dict, list[Path]]:
+    """Download `url` into `outdir` via the best available source; returns
+    (meta, files). Shared by direct-message and inline-mode handlers."""
+    try:
+        meta = await asyncio.to_thread(_blocking_fetch, url, outdir)
+    except Exception as primary_err:  # noqa: BLE001
+        # yt-dlp can't grab Instagram photo posts / carousels anonymously;
+        # sssinstagram's API can. Only worth trying for Instagram — TikTok
+        # already has its tikwm/yt-dlp fallback baked into _blocking_fetch.
+        if _platform(url) != "instagram":
+            raise
+        log.info("yt-dlp failed for %s (%s); trying sssinstagram", url, primary_err)
+        for p in Path(outdir).iterdir():
+            p.unlink()
+        try:
+            meta = await _fetch_via_sss(url, outdir)
+        except Exception as sss_err:  # noqa: BLE001
+            log.warning("sssinstagram fallback failed for %s: %s", url, sss_err)
+            raise primary_err from sss_err
+    files = sorted(p for p in Path(outdir).iterdir()
+                   if p.is_file() and p.suffix.lower() in MEDIA_EXT)
+    if not files:
+        raise RuntimeError("downloaded nothing for this link")
+    return meta, files
+
+
 # --------------------------------------------------------------------------- #
 # sending
 # --------------------------------------------------------------------------- #
@@ -313,26 +353,7 @@ async def handle_url(msg: Message, url: str) -> None:
         await bot.send_chat_action(msg.chat.id, ChatAction.UPLOAD_VIDEO)
         tmp = tempfile.mkdtemp(prefix="tgdl-", dir=str(STATE_DIR))
         try:
-            try:
-                meta = await asyncio.to_thread(_blocking_fetch, url, tmp)
-            except Exception as primary_err:  # noqa: BLE001
-                # yt-dlp can't grab Instagram photo posts / carousels
-                # anonymously; sssinstagram's API can. Only worth trying for
-                # Instagram — TikTok already has its tikwm/yt-dlp fallback.
-                if _platform(url) != "instagram":
-                    raise
-                log.info("yt-dlp failed for %s (%s); trying sssinstagram", url, primary_err)
-                for p in Path(tmp).iterdir():
-                    p.unlink()
-                try:
-                    meta = await _fetch_via_sss(url, tmp)
-                except Exception as sss_err:  # noqa: BLE001
-                    log.warning("sssinstagram fallback failed for %s: %s", url, sss_err)
-                    raise primary_err from sss_err
-            files = sorted(p for p in Path(tmp).iterdir()
-                           if p.is_file() and p.suffix.lower() in MEDIA_EXT)
-            if not files:
-                raise RuntimeError("downloaded nothing for this link")
+            meta, files = await _fetch_any(url, tmp)
             await _send_media(msg, files, _caption(meta, url))
         except Exception as e:  # noqa: BLE001
             log.exception("failed on %s", url)
@@ -345,8 +366,100 @@ HELP = (
     "Send me a <b>TikTok</b> or <b>Instagram</b> link and I'll send back the "
     "video or photos — no watermark, no ads.\n\n"
     "Works with short links (vt.tiktok.com/…), reels, posts and photo "
-    "slideshows. Several links in one message are fine."
+    "slideshows. Several links in one message are fine.\n\n"
+    "You can also use me without adding me to a chat: reply to someone's "
+    "link with a mention of @yetdlpbot, or just mention me together with a "
+    "link, and I'll post the media right there."
 )
+
+
+# --------------------------------------------------------------------------- #
+# guest / inline media delivery helpers
+# --------------------------------------------------------------------------- #
+def _extract_supported_url(text: str) -> str | None:
+    for u in URL_RE.findall(text or ""):
+        u = u.rstrip(").,]'\"")
+        if _platform(u):
+            return u
+    return None
+
+
+async def _stash_and_get_file_id(user_id: int, files: list[Path]) -> tuple[str, str, str]:
+    """Inline message edits can't take a raw file upload — only a file_id or
+    URL. Upload the first item to the requesting user's DM to mint a
+    file_id, then delete that stash message."""
+    f = files[0]
+    if f.suffix.lower() in VIDEO_EXT:
+        msg = await bot.send_video(user_id, FSInputFile(f), supports_streaming=True, **_probe(f))
+        file_id, kind = msg.video.file_id, "video"
+    else:
+        msg = await bot.send_photo(user_id, FSInputFile(f))
+        file_id, kind = msg.photo[-1].file_id, "photo"
+    try:
+        await bot.delete_message(user_id, msg.message_id)
+    except Exception:  # noqa: BLE001
+        pass
+    extra = len(files) - 1
+    note = (f"\n\n(+{extra} more in this post — message me the link directly for all of them)"
+            if extra else "")
+    return file_id, kind, note
+
+
+async def _deliver_media_via_inline_edit(imid: str, user_id: int, url: str) -> None:
+    """Download `url` and turn the placeholder inline/guest message at
+    `imid` into the real video/photo (or an error) via edit_message_media."""
+    async with _sem:
+        tmp = tempfile.mkdtemp(prefix="tgdl-", dir=str(STATE_DIR))
+        try:
+            meta, files = await _fetch_any(url, tmp)
+            file_id, kind, note = await _stash_and_get_file_id(user_id, files)
+            cap = (_caption(meta, url) + note)[:1024]
+            media = (InputMediaVideo(media=file_id, caption=cap, supports_streaming=True)
+                     if kind == "video" else InputMediaPhoto(media=file_id, caption=cap))
+            await bot.edit_message_media(inline_message_id=imid, media=media)
+        except Exception as e:  # noqa: BLE001
+            log.exception("inline delivery failed for %s", url)
+            try:
+                await bot.edit_message_text(f"❌ Couldn't download that link.\n{_esc(str(e))}",
+                                            inline_message_id=imid)
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# guest mode — @mention the bot, or reply to a message with a link and
+# mention it, in any chat it isn't even a member of. Needs "Guest Mode"
+# turned on for this bot in BotFather's Mini App (Bot Settings).
+# --------------------------------------------------------------------------- #
+@dp.guest_message()
+async def on_guest_message(msg: Message) -> None:
+    if ALLOWED and msg.from_user and msg.from_user.id not in ALLOWED:
+        return
+
+    # A guest_message also fires when someone just replies to one of the
+    # bot's own messages ("HAHAHA" under a video it posted). Don't treat the
+    # bot's own caption (which carries the source link) as a fetch request.
+    replied = msg.reply_to_message
+    replied_is_ours = bool(replied and replied.from_user and replied.from_user.id == BOT_ID)
+
+    url = None
+    if replied and not replied_is_ours:
+        url = _extract_supported_url(replied.text or replied.caption or "")
+    if not url:
+        url = _extract_supported_url(msg.text or msg.caption or "")
+    if not url:
+        return  # nothing to do — stay silent rather than spam a hint
+
+    sent = await bot.answer_guest_query(
+        msg.guest_query_id,
+        result=InlineQueryResultArticle(
+            id="0", title="yetdlp",
+            input_message_content=InputTextMessageContent(message_text=f"⏳ Fetching {url} …"),
+        ),
+    )
+    await _deliver_media_via_inline_edit(sent.inline_message_id, msg.from_user.id, url)
 
 
 @dp.message(CommandStart())
