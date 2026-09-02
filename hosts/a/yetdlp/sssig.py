@@ -139,6 +139,10 @@ class SssInstagram:
                 page = self._page
                 assert page is not None
 
+                # Reload to a clean form every time — reusing the page across
+                # requests (the "clear" button) is flaky: the 3rd submit in a
+                # row silently never fires the /api/convert call.
+                await page.goto(HOME, wait_until="domcontentloaded", timeout=60000)
                 await page.fill("#input", url)
                 await page.wait_for_timeout(400)
                 async with page.expect_response(
@@ -150,10 +154,6 @@ class SssInstagram:
                 if not resp.ok:
                     raise RuntimeError(f"sssinstagram returned HTTP {resp.status}")
                 data = await resp.json()
-                try:
-                    await page.click("button.btn-clear", timeout=3000)
-                except Exception:  # noqa: BLE001
-                    pass  # cosmetic reset only
             except Exception:
                 # a wedged page/context is not worth keeping around
                 await self._shutdown()

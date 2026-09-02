@@ -33,6 +33,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -123,10 +125,25 @@ def _http_get(url: str, timeout: int = 30) -> bytes:
         return r.read()
 
 
-def _download_to(url: str, dest: Path, timeout: int = 120) -> None:
+_RETRY_CODES = {408, 429, 500, 502, 503, 504}
+
+
+def _download_to(url: str, dest: Path, timeout: int = 120, retries: int = 4) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://www.tiktok.com/"})
-    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
-        shutil.copyfileobj(r, f)
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f)
+            return
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code not in _RETRY_CODES:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            last = e
+        time.sleep(1.5 * (attempt + 1))
+    raise last  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #
@@ -221,8 +238,16 @@ def _friendly_ydl_error(raw: str) -> str:
 async def _fetch_via_sss(url: str, outdir: str) -> dict:
     result = await sss.fetch(url)
     out = Path(outdir)
+    total = len(result["items"])
+    ok = 0
     for i, it in enumerate(result["items"], 1):
-        await asyncio.to_thread(_download_to, it["url"], out / f"{i:03d}.{it['ext']}")
+        try:
+            await asyncio.to_thread(_download_to, it["url"], out / f"{i:03d}.{it['ext']}")
+            ok += 1
+        except Exception as e:  # noqa: BLE001 — one dead CDN link shouldn't sink the post
+            log.warning("sss item %d/%d failed to download: %s", i, total, e)
+    if not ok:
+        raise RuntimeError("sssinstagram media links all failed to download")
     return {"title": result["title"], "uploader": result["username"]}
 
 
@@ -268,6 +293,36 @@ def _shrink_video(path: Path) -> Path | None:
         subprocess.run(cmd, check=True, capture_output=True, timeout=600)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         log.warning("ffmpeg shrink failed: %s", e)
+        return None
+    return out if out.exists() and out.stat().st_size <= MAX_UPLOAD else None
+
+
+def _slideshow(images: list[Path], outdir: str, secs: float = 3.0) -> Path | None:
+    """Guest/inline replies can carry only one media item. Turn a photo
+    carousel into a single mp4 slideshow (each image `secs` seconds, padded
+    onto a square canvas) so all of them come through in one message."""
+    if len(images) < 2:
+        return None
+    listfile = Path(outdir) / "_slides.txt"
+    lines = []
+    for p in images:
+        lines.append(f"file '{p.as_posix()}'")
+        lines.append(f"duration {secs}")
+    lines.append(f"file '{images[-1].as_posix()}'")  # concat demuxer quirk
+    listfile.write_text("\n".join(lines))
+    out = Path(outdir) / "_slideshow.mp4"
+    vf = ("scale=1080:1080:force_original_aspect_ratio=decrease,"
+          "pad=1080:1080:(ow-iw)/2:(oh-ih)/2:color=white,"
+          "setsar=1,fps=30,format=yuv420p")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listfile),
+        "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+        "-movflags", "+faststart", str(out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        log.warning("ffmpeg slideshow failed: %s", e)
         return None
     return out if out.exists() and out.stat().st_size <= MAX_UPLOAD else None
 
@@ -440,6 +495,13 @@ async def _deliver_media_via_inline_edit(imid: str, user_id: int, url: str) -> N
         tmp = tempfile.mkdtemp(prefix="tgdl-", dir=str(STATE_DIR))
         try:
             meta, files = await _fetch_any(url, tmp)
+            # A guest/inline reply is a single item. If the post is a photo
+            # carousel, stitch every image into one slideshow video so none
+            # are lost; fall back to first-photo-plus-note if that fails.
+            if len(files) > 1 and all(f.suffix.lower() in IMAGE_EXT for f in files):
+                slides = await asyncio.to_thread(_slideshow, files, tmp)
+                if slides:
+                    files = [slides]
             file_id, kind, note = await _stash_and_get_file_id(user_id, files)
             cap = (_caption(meta, url) + note)[:1024]
             media = (InputMediaVideo(media=file_id, caption=cap, supports_streaming=True)
