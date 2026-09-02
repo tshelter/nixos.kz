@@ -38,19 +38,46 @@ _CHROMIUM_ARGS = [
 ]
 
 
-def _parse(data: dict) -> dict:
-    items = []
-    for it in data.get("url") or []:
-        u = it.get("url")
-        if not u:
+_VIDEO_EXT = ("mp4", "mov", "webm", "m4v", "mkv")
+
+
+def _pick_variant(variants) -> dict | None:
+    """One media item carries a list of format options (quality variants for a
+    video, usually a single entry for an image). Pick the highest-quality one
+    that actually has a URL."""
+    best, best_q = None, -1
+    for v in variants or []:
+        if not isinstance(v, dict) or not v.get("url"):
             continue
-        ext = (it.get("ext") or it.get("type") or "").lower()
-        kind = "video" if ext in ("mp4", "mov", "webm", "m4v") else "image"
-        items.append({"url": u, "ext": ext or ("mp4" if kind == "video" else "jpg"),
-                      "kind": kind})
-    meta = data.get("meta") or {}
-    return {"items": items, "title": meta.get("title") or "",
-            "username": meta.get("username") or ""}
+        try:
+            q = int(v.get("quality") or 0)
+        except (TypeError, ValueError):
+            q = 0
+        if best is None or q > best_q:
+            best, best_q = v, q
+    return best
+
+
+def _parse(data) -> dict:
+    """sssinstagram returns a single dict for one photo/video, or a list of
+    such dicts for a carousel. Normalise both to {items, title, username}."""
+    entries = data if isinstance(data, list) else [data]
+    items, title, username = [], "", ""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        v = _pick_variant(entry.get("url"))
+        if not v:
+            continue
+        ext = (v.get("ext") or v.get("type") or "").lower().lstrip(".")
+        kind = "video" if ext in _VIDEO_EXT else "image"
+        if not ext:
+            ext = "mp4" if kind == "video" else "jpg"
+        items.append({"url": v["url"], "ext": ext, "kind": kind})
+        meta = entry.get("meta") or {}
+        title = title or meta.get("title") or ""
+        username = username or meta.get("username") or ""
+    return {"items": items, "title": title, "username": username}
 
 
 class SssInstagram:
@@ -136,5 +163,6 @@ class SssInstagram:
 
         result = _parse(data)
         if not result["items"]:
-            raise RuntimeError(data.get("error") or "sssinstagram found no media for this link")
+            err = data.get("error") if isinstance(data, dict) else None
+            raise RuntimeError(err or "sssinstagram found no media for this link")
         return result

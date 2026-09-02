@@ -42,6 +42,7 @@ from sssig import SssInstagram
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     FSInputFile,
@@ -67,6 +68,9 @@ ALLOWED = {
 STATE_DIR = Path(os.environ.get("STATE_DIR", ".")).resolve()
 COOKIES = STATE_DIR / "cookies.txt"
 MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "49")) * 1024 * 1024
+# Chat used to mint a file_id for guest/inline delivery when the requester has
+# never opened a DM with the bot. Falls back to the allowlist otherwise.
+STASH_CHAT_ID = os.environ.get("STASH_CHAT_ID", "").strip()
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -207,7 +211,7 @@ def _friendly_ydl_error(raw: str) -> str:
     if any(s in low for s in ("login required", "rate-limit", "checkpoint",
                               "empty media response", "requires authentication")):
         return "Instagram wants this server to log in to see that post."
-    if "no video in this post" in low:
+    if "no video in this post" in low or "no video formats found" in low:
         return "Photo-only Instagram post (yt-dlp can't grab those anonymously)."
     if "unavailable" in low or "not available" in low or "removed" in low:
         return "The post is private, removed, or region-locked."
@@ -384,25 +388,49 @@ def _extract_supported_url(text: str) -> str | None:
     return None
 
 
+def _stash_targets(user_id: int) -> list[int]:
+    """Where to upload the file to mint a file_id, best first: the requester's
+    own DM, then an explicit STASH_CHAT_ID, then anyone on the allowlist (the
+    owner has certainly /start-ed the bot). Guests who never opened a DM with
+    the bot can't be sent to directly (Telegram 403)."""
+    out: list[int] = []
+    for t in [user_id, int(STASH_CHAT_ID) if STASH_CHAT_ID else None, *sorted(ALLOWED)]:
+        if t is not None and t not in out:
+            out.append(t)
+    return out
+
+
 async def _stash_and_get_file_id(user_id: int, files: list[Path]) -> tuple[str, str, str]:
     """Inline message edits can't take a raw file upload — only a file_id or
-    URL. Upload the first item to the requesting user's DM to mint a
-    file_id, then delete that stash message."""
+    URL. Upload the first item to a chat we can post to, mint a file_id, then
+    delete that stash message."""
     f = files[0]
-    if f.suffix.lower() in VIDEO_EXT:
-        msg = await bot.send_video(user_id, FSInputFile(f), supports_streaming=True, **_probe(f))
-        file_id, kind = msg.video.file_id, "video"
-    else:
-        msg = await bot.send_photo(user_id, FSInputFile(f))
-        file_id, kind = msg.photo[-1].file_id, "photo"
-    try:
-        await bot.delete_message(user_id, msg.message_id)
-    except Exception:  # noqa: BLE001
-        pass
-    extra = len(files) - 1
-    note = (f"\n\n(+{extra} more in this post — message me the link directly for all of them)"
-            if extra else "")
-    return file_id, kind, note
+    is_video = f.suffix.lower() in VIDEO_EXT
+    last_err: Exception | None = None
+    for chat_id in _stash_targets(user_id):
+        try:
+            if is_video:
+                msg = await bot.send_video(chat_id, FSInputFile(f),
+                                           supports_streaming=True, **_probe(f))
+                file_id, kind = msg.video.file_id, "video"
+            else:
+                msg = await bot.send_photo(chat_id, FSInputFile(f))
+                file_id, kind = msg.photo[-1].file_id, "photo"
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            last_err = e
+            continue
+        try:
+            await bot.delete_message(chat_id, msg.message_id)
+        except Exception:  # noqa: BLE001
+            pass
+        extra = len(files) - 1
+        note = (f"\n\n(+{extra} more in this post — message me the link directly for all of them)"
+                if extra else "")
+        return file_id, kind, note
+    raise RuntimeError(
+        "couldn't stage this file for in-chat delivery — open a DM with "
+        "@yetdlpbot (send it /start) once, then try again"
+    ) from last_err
 
 
 async def _deliver_media_via_inline_edit(imid: str, user_id: int, url: str) -> None:
