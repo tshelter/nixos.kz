@@ -37,6 +37,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yt_dlp
@@ -73,6 +74,12 @@ MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "49")) * 1024 * 1024
 # Chat used to mint a file_id for guest/inline delivery when the requester has
 # never opened a DM with the bot. Falls back to the allowlist otherwise.
 STASH_CHAT_ID = os.environ.get("STASH_CHAT_ID", "").strip()
+
+# Daily self-check: download one link of each media shape; ping SELFCHECK_NOTIFY
+# only if something breaks. SELFCHECK_AT is HH:MM UTC.
+SELFCHECK_ENABLE = os.environ.get("SELFCHECK_ENABLE", "1").lower() not in ("0", "no", "false", "")
+SELFCHECK_AT = os.environ.get("SELFCHECK_AT", "09:00").strip()
+SELFCHECK_NOTIFY = os.environ.get("SELFCHECK_NOTIFY", "").strip()
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -562,6 +569,22 @@ async def on_help(msg: Message) -> None:
     await msg.answer(HELP)
 
 
+@dp.message(Command("selfcheck"))
+async def on_selfcheck(msg: Message) -> None:
+    """Admin: run the media self-check now. `/selfcheck fail` injects a
+    synthetic failure so the alert path can be exercised."""
+    if ALLOWED and (not msg.from_user or msg.from_user.id not in ALLOWED):
+        return
+    arg = (msg.text or "").partition(" ")[2].strip().lower()
+    await msg.answer("running self-check…")
+    extra = [("Synthetic failure (test)", "FAIL")] if arg == "fail" else None
+    results = await run_selfcheck(extra)
+    report = _format_selfcheck(results)
+    await msg.answer(report)
+    if any(not r.ok for r in results):
+        await _notify_selfcheck(report, also_skip=msg.chat.id)
+
+
 @dp.message(F.text)
 async def on_text(msg: Message) -> None:
     if ALLOWED and msg.from_user and msg.from_user.id not in ALLOWED:
@@ -576,14 +599,144 @@ async def on_text(msg: Message) -> None:
         await handle_url(msg, url)
 
 
+# --------------------------------------------------------------------------- #
+# daily self-check
+# --------------------------------------------------------------------------- #
+# One canonical link per media shape. When a link rots it shows up as a failure
+# in the daily report (which is the point) — swap it here when that happens.
+SELFCHECK_CASES: list[tuple[str, str]] = [
+    ("TikTok · video", "https://vt.tiktok.com/ZSVvsAodq/"),
+    ("TikTok · photo post",
+     "https://www.tiktok.com/@m6010283/photo/7678391802965052680"),
+    ("Instagram · reel", "https://www.instagram.com/reel/DctvpfyzQYM/"),
+    ("Instagram · single photo", "https://www.instagram.com/p/DcyibZtoO_9/"),
+    ("Instagram · photo carousel", "https://www.instagram.com/p/Dcyij21CEbH/"),
+]
+
+
+class _CheckResult:
+    __slots__ = ("label", "ok", "detail", "secs")
+
+    def __init__(self, label: str, ok: bool, detail: str, secs: float) -> None:
+        self.label, self.ok, self.detail, self.secs = label, ok, detail, secs
+
+
+async def _run_one_check(label: str, url: str) -> _CheckResult:
+    t0 = time.monotonic()
+    if url == "FAIL":  # synthetic case for `/selfcheck fail`
+        return _CheckResult(label, False, "synthetic failure (notification test)", 0.0)
+    tmp = tempfile.mkdtemp(prefix="tgdl-chk-", dir=str(STATE_DIR))
+    try:
+        _, files = await _fetch_any(url, tmp)
+        kinds: dict[str, int] = {}
+        for f in files:
+            k = ("video" if f.suffix.lower() in VIDEO_EXT
+                 else "image" if f.suffix.lower() in IMAGE_EXT else "file")
+            kinds[k] = kinds.get(k, 0) + 1
+        detail = ", ".join(f"{n} {k}" for k, n in kinds.items()) or "0 files"
+        return _CheckResult(label, True, detail, time.monotonic() - t0)
+    except Exception as e:  # noqa: BLE001
+        first = (str(e).splitlines() or [""])[0]
+        return _CheckResult(label, False, first[:180] or e.__class__.__name__,
+                            time.monotonic() - t0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def run_selfcheck(extra: list[tuple[str, str]] | None = None) -> list[_CheckResult]:
+    out: list[_CheckResult] = []
+    for label, url in list(SELFCHECK_CASES) + list(extra or []):
+        async with _sem:
+            out.append(await _run_one_check(label, url))
+    return out
+
+
+def _format_selfcheck(results: list[_CheckResult]) -> str:
+    bad = [r for r in results if not r.ok]
+    n = len(results)
+    head = (f"⚠️ <b>yetdlp self-check — {len(bad)}/{n} FAILING</b>" if bad
+            else f"✅ <b>yetdlp self-check — all {n} OK</b>")
+    w = max(len(r.label) for r in results)
+    rows = "\n".join(
+        f"{'ok  ' if r.ok else 'FAIL'}  {r.label.ljust(w)}   {r.detail}  ·  {r.secs:.1f}s"
+        for r in results
+    )
+    parts = [head, f"<pre>{_esc(rows)}</pre>"]
+    if bad:
+        blob = " ".join(r.label.lower() for r in bad)
+        hint = []
+        if "tiktok" in blob:
+            hint.append("tikwm / TikTok")
+        if "instagram" in blob and "carousel" not in blob:
+            hint.append("yt-dlp / Instagram anon")
+        if "carousel" in blob:
+            hint.append("sssinstagram fallback")
+        if hint:
+            parts.append("Likely: " + "; ".join(dict.fromkeys(hint)))
+        parts.append(f"{n - len(bad)}/{n} media types still working.")
+    parts.append(f"<i>host {os.uname().nodename} · "
+                 f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}</i>")
+    return "\n\n".join(parts)[:4000]
+
+
+def _notify_chat_id() -> int | str | None:
+    target = SELFCHECK_NOTIFY or (str(min(ALLOWED)) if ALLOWED else "")
+    if not target:
+        return None
+    return int(target) if re.fullmatch(r"-?\d+", target) else target
+
+
+async def _notify_selfcheck(report: str, also_skip: int | None = None) -> None:
+    chat = _notify_chat_id()
+    if chat is None or chat == also_skip:
+        return
+    try:
+        await bot.send_message(chat, report)
+    except Exception:  # noqa: BLE001
+        log.exception("self-check: could not notify %s", chat)
+
+
+def _secs_until(hhmm: str) -> float:
+    try:
+        hh, mm = (int(x) for x in hhmm.split(":", 1))
+    except Exception:  # noqa: BLE001
+        hh, mm = 9, 0
+    now = datetime.now(timezone.utc)
+    nxt = now.replace(hour=hh % 24, minute=mm % 60, second=0, microsecond=0)
+    if nxt <= now:
+        nxt += timedelta(days=1)
+    return (nxt - now).total_seconds()
+
+
+async def _selfcheck_loop() -> None:
+    if not SELFCHECK_ENABLE:
+        log.info("self-check: disabled")
+        return
+    log.info("self-check: daily at %s UTC, notify=%s", SELFCHECK_AT, _notify_chat_id())
+    while True:
+        await asyncio.sleep(_secs_until(SELFCHECK_AT))
+        try:
+            results = await run_selfcheck()
+            bad = [r for r in results if not r.ok]
+            log.info("self-check: %d/%d failing%s", len(bad), len(results),
+                     "" if not bad else " — " + ", ".join(r.label for r in bad))
+            if bad:
+                await _notify_selfcheck(_format_selfcheck(results))
+        except Exception:  # noqa: BLE001
+            log.exception("self-check: run failed")
+        await asyncio.sleep(90)  # don't re-fire within the same minute
+
+
 async def main() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     me = await bot.get_me()
     log.info("starting as @%s (id=%s); allowlist=%s; cookies=%s",
              me.username, me.id, ALLOWED or "everyone", COOKIES.exists())
+    checker = asyncio.create_task(_selfcheck_loop())
     try:
         await dp.start_polling(bot)
     finally:
+        checker.cancel()
         await sss.close()
 
 

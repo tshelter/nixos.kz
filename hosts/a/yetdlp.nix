@@ -6,6 +6,13 @@
 #
 #     BOT_TOKEN=123456:ABC...
 #     ALLOWED_USER_IDS=111 222      # optional; empty = anyone may use it
+#     SELFCHECK_NOTIFY=111          # optional; daily-check alerts go here
+#                                   # (defaults to the lowest allowlist id)
+#
+# Once a day (SELFCHECK_AT, UTC) the bot downloads one link of each media
+# shape and messages SELFCHECK_NOTIFY only if something broke — a green run
+# is silent. `/selfcheck` (allowlisted) runs it on demand; `/selfcheck fail`
+# exercises the alert.
 #
 # Instagram photo posts / carousels (yt-dlp can't fetch those anonymously)
 # fall back to sssinstagram.com, driven through a headless Chromium
@@ -34,6 +41,7 @@ in
       HOME = "/var/lib/yetdlp";
       PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
       PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1";
+      SELFCHECK_AT = "09:00"; # UTC; daily media self-check
     };
 
     serviceConfig = {
