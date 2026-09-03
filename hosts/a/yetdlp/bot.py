@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Telegram bot that downloads TikTok / Instagram videos and photos (no ads).
 
-Send it any message containing a TikTok or Instagram link and it replies with
-the media. Handles short links (vt.tiktok.com), single videos, Instagram reels
-and posts, and TikTok / Instagram photo slideshows (multiple images).
+Send it any message containing a TikTok, Instagram or YouTube link and it
+replies with the media. Handles short links (vt.tiktok.com), single videos,
+Instagram reels and posts, YouTube Shorts, and TikTok / Instagram photo
+slideshows (multiple images).
 
 Also works in guest mode (like @mira and similar bots): reply to someone's
 message that contains a link and mention @yetdlpbot in the reply, or just
@@ -44,6 +45,8 @@ import yt_dlp
 from sssig import SssInstagram
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
@@ -70,7 +73,11 @@ ALLOWED = {
 }
 STATE_DIR = Path(os.environ.get("STATE_DIR", ".")).resolve()
 COOKIES = STATE_DIR / "cookies.txt"
-MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", "49")) * 1024 * 1024
+# A local Telegram Bot API server (telegram-bot-api) lifts the 50 MB upload
+# cap to 2 GB. Point at it with TELEGRAM_API_BASE=http://127.0.0.1:8081.
+TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "").strip()
+_default_max = "1900" if TELEGRAM_API_BASE else "49"
+MAX_UPLOAD = int(os.environ.get("MAX_UPLOAD_MB", _default_max)) * 1024 * 1024
 # Chat used to mint a file_id for guest/inline delivery when the requester has
 # never opened a DM with the bot. Falls back to the allowlist otherwise.
 STASH_CHAT_ID = os.environ.get("STASH_CHAT_ID", "").strip()
@@ -89,6 +96,7 @@ UA = (
 URL_RE = re.compile(r"https?://\S+", re.I)
 TIKTOK_RE = re.compile(r"(?:^|\.)tiktok\.com$|(?:^|\.)douyin\.com$", re.I)
 INSTAGRAM_RE = re.compile(r"(?:^|\.)(?:instagram\.com|instagr\.am|ig\.me)$", re.I)
+YOUTUBE_RE = re.compile(r"(?:^|\.)(?:youtube\.com|youtu\.be|youtube-nocookie\.com)$", re.I)
 
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -97,7 +105,12 @@ MEDIA_EXT = VIDEO_EXT | IMAGE_EXT | AUDIO_EXT
 
 _sem = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENCY", "3")))
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+_session = (
+    AiohttpSession(api=TelegramAPIServer.from_base(TELEGRAM_API_BASE))
+    if TELEGRAM_API_BASE else None
+)
+bot = Bot(token=TOKEN, session=_session,
+          default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 sss = SssInstagram()
 BOT_ID = int(TOKEN.split(":", 1)[0])
@@ -119,6 +132,8 @@ def _platform(url: str) -> str | None:
         return "tiktok"
     if INSTAGRAM_RE.search(h):
         return "instagram"
+    if YOUTUBE_RE.search(h):
+        return "youtube"
     return None
 
 
@@ -213,6 +228,38 @@ def _ydl_download(url: str, outdir: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# YouTube via loader.to
+# --------------------------------------------------------------------------- #
+# YouTube blocks this server's datacenter IP outright ("Sign in to confirm
+# you're not a bot") for every yt-dlp player client. loader.to fetches it on
+# their own infra and hands back a temporary direct link. Async job API:
+# start -> poll progress_url -> download_url.
+LOADERTO_API = "https://loader.to/ajax/download.php"
+
+
+def _loaderto_download(url: str, outdir: str, fmt: str = "720") -> dict:
+    q = LOADERTO_API + "?" + urllib.parse.urlencode({"format": fmt, "url": url})
+    start = json.loads(_http_get(q, timeout=30))
+    if not start.get("success") or not start.get("progress_url"):
+        raise RuntimeError(f"loader.to rejected the link ({start.get('text') or start})")
+    title = start.get("title") or ""
+    dl = None
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline:
+        time.sleep(2.5)
+        p = json.loads(_http_get(start["progress_url"], timeout=30))
+        if p.get("download_url"):
+            dl = p["download_url"]
+            break
+        if (p.get("text") or "").strip().lower() == "failed":
+            raise RuntimeError("loader.to could not process this video")
+    if not dl:
+        raise RuntimeError("loader.to timed out preparing the download")
+    _download_to(dl, Path(outdir) / "001.mp4", timeout=600)
+    return {"title": title, "uploader": ""}
+
+
 def _blocking_fetch(url: str, outdir: str) -> dict:
     """Download media for `url` into `outdir`. Returns {title, uploader}."""
     plat = _platform(url)
@@ -221,6 +268,14 @@ def _blocking_fetch(url: str, outdir: str) -> dict:
             return _tiktok_tikwm(url, outdir)
         except Exception as e:  # noqa: BLE001
             log.warning("tikwm failed for %s (%s); trying yt-dlp", url, e)
+            for p in Path(outdir).iterdir():
+                p.unlink()
+            return _ydl_download(url, outdir)
+    if plat == "youtube":
+        try:
+            return _loaderto_download(url, outdir)
+        except Exception as e:  # noqa: BLE001
+            log.warning("loader.to failed for %s (%s); trying yt-dlp", url, e)
             for p in Path(outdir).iterdir():
                 p.unlink()
             return _ydl_download(url, outdir)
@@ -236,7 +291,11 @@ def _friendly_ydl_error(raw: str) -> str:
                               "empty media response", "requires authentication")):
         return "Instagram wants this server to log in to see that post."
     if "no video in this post" in low or "no video formats found" in low:
-        return "Photo-only Instagram post (yt-dlp can't grab those anonymously)."
+        return ("Instagram photo post. Instagram now blocks anonymous photo "
+                "downloads from this server and the sssinstagram fallback is "
+                "behind a CAPTCHA. Reels/videos still work.")
+    if "sign in to confirm" in low or "confirm you" in low and "not a bot" in low:
+        return "YouTube is rate-limiting this server. Try again in a bit."
     if "unavailable" in low or "not available" in low or "removed" in low:
         return "The post is private, removed, or region-locked."
     return re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?", "", raw).strip()[:400]
@@ -429,10 +488,10 @@ async def handle_url(msg: Message, url: str) -> None:
 
 
 HELP = (
-    "Send me a <b>TikTok</b> or <b>Instagram</b> link and I'll send back the "
-    "video or photos — no watermark, no ads.\n\n"
-    "Works with short links (vt.tiktok.com/…), reels, posts and photo "
-    "slideshows. Several links in one message are fine.\n\n"
+    "Send me a <b>TikTok</b>, <b>Instagram</b> or <b>YouTube</b> link and I'll "
+    "send back the video or photos — no watermark, no ads.\n\n"
+    "Works with short links (vt.tiktok.com/…), reels, YouTube Shorts, posts and "
+    "photo slideshows. Several links in one message are fine.\n\n"
     "You can also use me without adding me to a chat: reply to someone's "
     "link with a mention of @yetdlpbot, or just mention me together with a "
     "link, and I'll post the media right there."
@@ -593,7 +652,7 @@ async def on_text(msg: Message) -> None:
     urls = [u for u in urls if _platform(u)]
     if not urls:
         if msg.chat.type == "private":
-            await msg.reply("Send me a TikTok or Instagram link. /help for details.")
+            await msg.reply("Send me a TikTok, Instagram or YouTube link. /help for details.")
         return
     for url in urls:
         await handle_url(msg, url)
@@ -611,6 +670,7 @@ SELFCHECK_CASES: list[tuple[str, str]] = [
     ("Instagram · reel", "https://www.instagram.com/reel/DctvpfyzQYM/"),
     ("Instagram · single photo", "https://www.instagram.com/p/DcyibZtoO_9/"),
     ("Instagram · photo carousel", "https://www.instagram.com/p/Dcyij21CEbH/"),
+    ("YouTube · Shorts", "https://www.youtube.com/shorts/W-VQ9xKFdUs"),
 ]
 
 
@@ -663,14 +723,16 @@ def _format_selfcheck(results: list[_CheckResult]) -> str:
     )
     parts = [head, f"<pre>{_esc(rows)}</pre>"]
     if bad:
-        blob = " ".join(r.label.lower() for r in bad)
-        hint = []
-        if "tiktok" in blob:
+        hint: list[str] = []
+        labels = [r.label.lower() for r in bad]
+        if any("tiktok" in x for x in labels):
             hint.append("tikwm / TikTok")
-        if "instagram" in blob and "carousel" not in blob:
+        if any("reel" in x for x in labels):
             hint.append("yt-dlp / Instagram anon")
-        if "carousel" in blob:
-            hint.append("sssinstagram fallback")
+        if any("instagram" in x and "photo" in x for x in labels):
+            hint.append("IG photos blocked from this IP (sssinstagram CAPTCHA) — needs cookies/proxy")
+        if any("youtube" in x for x in labels):
+            hint.append("loader.to / YouTube")
         if hint:
             parts.append("Likely: " + "; ".join(dict.fromkeys(hint)))
         parts.append(f"{n - len(bad)}/{n} media types still working.")
@@ -727,11 +789,36 @@ async def _selfcheck_loop() -> None:
         await asyncio.sleep(90)  # don't re-fire within the same minute
 
 
+def _ensure_migrated_to_local_api() -> None:
+    """Telegram requires a bot to logOut of the cloud API once before it can be
+    used with a self-hosted server. Idempotent via a marker file."""
+    if not TELEGRAM_API_BASE:
+        return
+    marker = STATE_DIR / ".cloud-logged-out"
+    if marker.exists():
+        return
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TOKEN}/logOut", method="POST")
+        urllib.request.urlopen(req, timeout=30).read()
+        marker.write_text("")
+        log.info("logged out of cloud Bot API; now bound to %s", TELEGRAM_API_BASE)
+    except urllib.error.HTTPError as e:
+        # 401 == already migrated / no active cloud session — fine, mark done.
+        if e.code in (401, 429):
+            marker.write_text("")
+        log.warning("cloud logOut -> HTTP %s (continuing)", e.code)
+    except Exception as e:  # noqa: BLE001
+        log.warning("cloud logOut failed: %s (will retry next start)", e)
+
+
 async def main() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_migrated_to_local_api()
     me = await bot.get_me()
-    log.info("starting as @%s (id=%s); allowlist=%s; cookies=%s",
-             me.username, me.id, ALLOWED or "everyone", COOKIES.exists())
+    log.info("starting as @%s (id=%s); allowlist=%s; cookies=%s; api=%s",
+             me.username, me.id, ALLOWED or "everyone", COOKIES.exists(),
+             TELEGRAM_API_BASE or "cloud")
     checker = asyncio.create_task(_selfcheck_loop())
     try:
         await dp.start_polling(bot)

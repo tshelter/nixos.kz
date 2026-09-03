@@ -30,8 +30,8 @@ in
   systemd.services.yetdlp = {
     description = "yetdlp Telegram media-download bot";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
+    after = [ "network-online.target" "telegram-bot-api.service" ];
+    wants = [ "network-online.target" "telegram-bot-api.service" ];
 
     path = [ pkgs.ffmpeg ];
 
@@ -42,6 +42,8 @@ in
       PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
       PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1";
       SELFCHECK_AT = "09:00"; # UTC; daily media self-check
+      # local telegram-bot-api (./telegram-bot-api.nix) — 2 GB upload cap
+      TELEGRAM_API_BASE = "http://127.0.0.1:8081";
     };
 
     serviceConfig = {

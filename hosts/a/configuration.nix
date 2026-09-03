@@ -13,6 +13,7 @@
     ../../modules/xray.nix
     ./wireguard.nix
     ../../modules/zapret.nix
+    ./telegram-bot-api.nix
     ./yetdlp.nix
   ];
 
