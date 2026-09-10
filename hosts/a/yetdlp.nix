@@ -41,14 +41,20 @@ in
       HOME = "/var/lib/yetdlp";
       PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
       PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1";
-      SELFCHECK_AT = "09:00"; # UTC; daily media self-check
+      SELFCHECK_AT = "09:00"; # daily media self-check, in SELFCHECK_TZ
+      SELFCHECK_TZ = "+05:00"; # Asia/Almaty (Kazakhstan, no DST)
       # local telegram-bot-api (./telegram-bot-api.nix) — 2 GB upload cap
       TELEGRAM_API_BASE = "http://127.0.0.1:8081";
     };
 
     serviceConfig = {
       ExecStart = "${pyEnv}/bin/python ${./yetdlp}/bot.py";
-      EnvironmentFile = config.age.secrets.yetdlp.path;
+      # yetdlp.age = BOT_TOKEN + allowlist + selfcheck; yetdlp-cookies.age =
+      # COOKIES_{INSTAGRAM,YOUTUBE,THREADS}_B64 (seeded to STATE_DIR on start).
+      EnvironmentFile = [
+        config.age.secrets.yetdlp.path
+        config.age.secrets.yetdlp-cookies.path
+      ];
       DynamicUser = true;
       StateDirectory = "yetdlp";
       WorkingDirectory = "/var/lib/yetdlp";

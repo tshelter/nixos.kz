@@ -7,5 +7,6 @@ in
   "xray.age".publicKeys = publicKeys;
   "wireguard.age".publicKeys = publicKeys;
   "yetdlp.age".publicKeys = publicKeys;
+  "yetdlp-cookies.age".publicKeys = publicKeys;
   "tgbotapi.age".publicKeys = publicKeys;
 }
