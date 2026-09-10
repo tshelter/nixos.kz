@@ -857,8 +857,9 @@ SELFCHECK_CASES: list[tuple[str, str]] = [
     ("Instagram · single photo", "https://www.instagram.com/p/DcyibZtoO_9/"),
     ("Instagram · photo carousel", "https://www.instagram.com/p/Dcyij21CEbH/"),
     ("YouTube · Shorts", "https://www.youtube.com/shorts/W-VQ9xKFdUs"),
-    # Threads URL is filled in by the owner once we have a stable test post:
-    # ("Threads · video", "https://www.threads.com/@user/post/CODE"),
+    ("YouTube · video", "https://www.youtube.com/watch?v=jNQXAC9IVRw"),
+    ("Threads · video", "https://www.threads.com/@mosseri/post/DaxpWl5gJjx"),
+    ("Threads · photo", "https://www.threads.com/@mosseri/post/Db_AU3kFko7"),
 ]
 
 
