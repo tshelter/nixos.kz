@@ -9,4 +9,5 @@ in
   "yetdlp.age".publicKeys = publicKeys;
   "yetdlp-cookies.age".publicKeys = publicKeys;
   "tgbotapi.age".publicKeys = publicKeys;
+  "mtproto.age".publicKeys = publicKeys;
 }

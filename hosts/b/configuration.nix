@@ -11,6 +11,7 @@
     ./nginx.nix
     ./secret
     ../../modules/xray.nix
+    ../../modules/mtproto.nix
     ./wireguard.nix
     ../../modules/zapret.nix
     ./qbittorrent.nix

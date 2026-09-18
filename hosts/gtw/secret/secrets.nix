@@ -7,4 +7,5 @@ in
   "xray.age".publicKeys = publicKeys;
   "wireguard.age".publicKeys = publicKeys;
   "cloudflare.age".publicKeys = publicKeys;
+  "mtproto.age".publicKeys = publicKeys;
 }

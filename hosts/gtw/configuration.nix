@@ -12,6 +12,7 @@
     ./secret
     ../../modules/nginx.nix
     ../../modules/xray.nix
+    ../../modules/mtproto.nix
     ../../modules/nix.nix
     ./network.nix
     ../../modules/wireguard.nix
